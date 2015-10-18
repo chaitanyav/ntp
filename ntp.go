@@ -1,7 +1,9 @@
 package ntp
 
-//Reference https://www.eecis.udel.edu/~mills/database/rfc/rfc1305/rfc1305c.pdf
-
+//References
+// https://www.eecis.udel.edu/~mills/database/rfc/rfc1305/rfc1305c.pdf
+// http://svn.apache.org/viewvc/commons/proper/net/trunk/src/main/java/org/apache/commons/net/ntp/TimeStamp.java?view=markup
+//
 import (
 	"bytes"
 	"encoding/binary"
@@ -13,11 +15,14 @@ import (
 const NTP_EPOCH_OFFSET uint64 = 2208988800
 const TWO_32 = (uint64(1) << 32)
 const NANO_SEC = float64(1e-9)
+const MICRO_SEC = float64(1e-6)
 const GIGA_SEC = float64(1e9)
 
 var leapIndicator map[byte]string
 var mode map[byte]string
 var version byte
+var ClientReceiveTimeStamp time.Time
+var Offset uint64
 
 type NTP interface {
 	DecodeStratum() string
@@ -27,6 +32,7 @@ type NTP interface {
 	DecodeReferenceIdentifier() string
 	DecodeReceiveTimeStamp() time.Time
 	DecodeTransmitTimeStamp() time.Time
+	DecodeOriginateTimeStamp() time.Time
 }
 
 type DataPacket struct {
@@ -91,38 +97,44 @@ func (packet *DataPacket) DecodeReferenceIdentifier() string {
 	return ""
 }
 
-func (packet *DataPacket) DecodeReceiveTimeStamp() time.Time {
-	ts := packet.ReceiveTimeStamp >> 32
+func decodeTimeStamp(timestamp uint64) time.Time {
+	ts := timestamp >> 32
 	ts = ts - NTP_EPOCH_OFFSET
-	nanosec := packet.ReceiveTimeStamp & 0xffffffff
+	nanosec := timestamp & 0xffffffff
 	nanosec = uint64((float64(nanosec) * (GIGA_SEC) / float64(TWO_32)))
 	return time.Unix(int64(ts), int64(nanosec))
+}
+
+func encodeTimeStamp() uint64 {
+	seconds := uint64(time.Now().Unix())
+	ts := seconds + NTP_EPOCH_OFFSET
+	timestamp := (ts << 32)
+	timestamp += uint64(float64(seconds % uint64(GIGA_SEC)) * float64(TWO_32) / float64(GIGA_SEC))
+	return timestamp
+}
+
+func (packet *DataPacket) DecodeOriginateTimeStamp() time.Time {
+	return decodeTimeStamp(packet.OriginateTimeStamp)
+}
+
+func (packet *DataPacket) DecodeReceiveTimeStamp() time.Time {
+	return decodeTimeStamp(packet.ReceiveTimeStamp)
 }
 
 func (packet *DataPacket) DecodeTransmitTimeStamp() time.Time {
-	ts := packet.TransmitTimeStamp >> 32
-	ts = ts - NTP_EPOCH_OFFSET
-	nanosec := packet.TransmitTimeStamp & 0xffffffff
-	nanosec = uint64((float64(nanosec) * (GIGA_SEC) / float64(TWO_32)))
-	return time.Unix(int64(ts), int64(nanosec))
+	return decodeTimeStamp(packet.TransmitTimeStamp)
 }
 
 func setReferenceTimeStamp(packet *DataPacket) {
-	seconds := uint64(time.Now().Unix())
-	ts := seconds + NTP_EPOCH_OFFSET
-	packet.ReferenceTimeStamp = (ts << 32)
-	packet.ReferenceTimeStamp += uint64(float64(seconds) * (float64(TWO_32) * NANO_SEC))
+	packet.ReferenceTimeStamp = encodeTimeStamp()
 }
 
 func setOriginateTimeStamp(packet *DataPacket) {
-	seconds := uint64(time.Now().Unix())
-	ts := seconds + NTP_EPOCH_OFFSET
-	packet.OriginateTimeStamp = (ts << 32)
-	packet.OriginateTimeStamp += uint64(float64(seconds) * (float64(TWO_32) * NANO_SEC))
+	packet.OriginateTimeStamp = encodeTimeStamp()
 }
 
-func Query(packet DataPacket) (*DataPacket, error) {
-	conn, err := net.Dial("udp", "0.pool.ntp.org:123")
+func Query(packet DataPacket, server string) (*DataPacket, error) {
+	conn, err := net.Dial("udp", server+":123")
 	if err != nil {
 		log.Printf("error on connecting to NTP Server: %v\n", err)
 		return nil, err
@@ -130,7 +142,7 @@ func Query(packet DataPacket) (*DataPacket, error) {
 
 	setReferenceTimeStamp(&packet)
 	setOriginateTimeStamp(&packet)
-	log.Print("originate timestamp is: ", time.Unix(int64((packet.OriginateTimeStamp>>32)-NTP_EPOCH_OFFSET), 0), " seconds is: ", packet.OriginateTimeStamp>>32, " fraction is: ", packet.OriginateTimeStamp&0xffffffff)
+	//log.Print("originate timestamp is: ", time.Unix(int64((packet.OriginateTimeStamp>>32)-NTP_EPOCH_OFFSET), 0), " seconds is: ", packet.OriginateTimeStamp>>32, " fraction is: ", packet.OriginateTimeStamp&0xffffffff)
 	tmpBuf := new(bytes.Buffer)
 	err = binary.Write(tmpBuf, binary.BigEndian, packet)
 	if err != nil {
@@ -138,22 +150,22 @@ func Query(packet DataPacket) (*DataPacket, error) {
 		return nil, err
 	}
 
-	log.Print("sending request: ", packet)
-	n, err := conn.Write(tmpBuf.Bytes())
+	_, err = conn.Write(tmpBuf.Bytes())
 	if err != nil {
 		log.Printf("error on writing to UDP socket: %v\n", err)
 		return nil, err
 	}
-	log.Printf("Sent %d bytes on UDP socket\n", n)
+	log.Printf("Sent query to the %s at: %v", server, packet.DecodeOriginateTimeStamp())
 
 	data := make([]byte, 48)
-	n, err = conn.Read(data)
+	_, err = conn.Read(data)
 	if err != nil {
 		log.Printf("error on reading from UDP socket: %v\n", err)
 		return nil, err
 	}
 
-	log.Printf("Received %d bytes on UDP socket\n", n)
+	ClientReceiveTimeStamp = time.Now()
+	log.Printf("Received reply from the %s at: %v", server, ClientReceiveTimeStamp)
 	outBuf := bytes.NewReader(data)
 	resPacket := DataPacket{}
 	err = binary.Read(outBuf, binary.BigEndian, &resPacket)
