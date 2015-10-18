@@ -12,8 +12,8 @@ import (
 
 const NTP_EPOCH_OFFSET uint64 = 2208988800
 const TWO_32 = (uint64(1) << 32)
-const MICRO_SEC = float64(1e-6)
-const MEGA_SEC = float64(1e6)
+const NANO_SEC = float64(1e-9)
+const GIGA_SEC = float64(1e9)
 
 var leapIndicator map[byte]string
 var mode map[byte]string
@@ -25,6 +25,8 @@ type NTP interface {
 	DecodeVersion() byte
 	DecodeMode() string
 	DecodeReferenceIdentifier() string
+	DecodeReceiveTimeStamp() time.Time
+	DecodeTransmitTimeStamp() time.Time
 }
 
 type DataPacket struct {
@@ -89,17 +91,34 @@ func (packet *DataPacket) DecodeReferenceIdentifier() string {
 	return ""
 }
 
+func (packet *DataPacket) DecodeReceiveTimeStamp() time.Time {
+	ts := packet.ReceiveTimeStamp >> 32
+	ts = ts - NTP_EPOCH_OFFSET
+	nanosec := packet.ReceiveTimeStamp & 0xffffffff
+	nanosec = uint64((float64(nanosec) * (GIGA_SEC) / float64(TWO_32)))
+	return time.Unix(int64(ts), int64(nanosec))
+}
+
+func (packet *DataPacket) DecodeTransmitTimeStamp() time.Time {
+	ts := packet.TransmitTimeStamp >> 32
+	ts = ts - NTP_EPOCH_OFFSET
+	nanosec := packet.TransmitTimeStamp & 0xffffffff
+	nanosec = uint64((float64(nanosec) * (GIGA_SEC) / float64(TWO_32)))
+	return time.Unix(int64(ts), int64(nanosec))
+}
+
 func setReferenceTimeStamp(packet *DataPacket) {
-	timestamp := uint64(time.Now().Unix())
-	timestamp = timestamp + NTP_EPOCH_OFFSET
-	packet.ReferenceTimeStamp = (timestamp << 32)
+	seconds := uint64(time.Now().Unix())
+	ts := seconds + NTP_EPOCH_OFFSET
+	packet.ReferenceTimeStamp = (ts << 32)
+	packet.ReferenceTimeStamp += uint64(float64(seconds) * (float64(TWO_32) * NANO_SEC))
 }
 
 func setOriginateTimeStamp(packet *DataPacket) {
-	timestamp := uint64(time.Now().Unix())
-	timestamp = timestamp + NTP_EPOCH_OFFSET
-	packet.OriginateTimeStamp = (timestamp << 32)
-	packet.OriginateTimeStamp += uint64(float64(packet.OriginateTimeStamp) * (float64(TWO_32) * MICRO_SEC))
+	seconds := uint64(time.Now().Unix())
+	ts := seconds + NTP_EPOCH_OFFSET
+	packet.OriginateTimeStamp = (ts << 32)
+	packet.OriginateTimeStamp += uint64(float64(seconds) * (float64(TWO_32) * NANO_SEC))
 }
 
 func Query(packet DataPacket) (*DataPacket, error) {
@@ -111,7 +130,7 @@ func Query(packet DataPacket) (*DataPacket, error) {
 
 	setReferenceTimeStamp(&packet)
 	setOriginateTimeStamp(&packet)
-	//log.Print("originate timestamp is: ", time.Unix(int64(packet.OriginateTimeStamp>>32), 0), " timestamp is: ", packet.OriginateTimeStamp)
+	log.Print("originate timestamp is: ", time.Unix(int64((packet.OriginateTimeStamp>>32)-NTP_EPOCH_OFFSET), 0), " seconds is: ", packet.OriginateTimeStamp>>32, " fraction is: ", packet.OriginateTimeStamp&0xffffffff)
 	tmpBuf := new(bytes.Buffer)
 	err = binary.Write(tmpBuf, binary.BigEndian, packet)
 	if err != nil {
